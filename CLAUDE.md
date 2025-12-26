@@ -151,6 +151,34 @@ pytest -v  # Takes ~2 min, 90%+ tests should pass
 - `OperatorsFactory` - Creates anonymization operators by name
 - `NlpEngineProvider` - Instantiates NLP backends
 
+### PII Detection Flow (Analyzer Architecture)
+
+Understanding the multi-layered detection approach:
+
+1. **Text Input** → `AnalyzerEngine.analyze()`
+2. **NLP Processing** → NLP engine extracts tokens, lemmas, POS tags, NER entities
+3. **Recognizer Execution** (parallel):
+   - **Pattern-based**: Regex patterns with context enhancement
+   - **NLP-based**: Uses NER results from spaCy/Stanza/Transformers
+   - **Rule-based**: Custom logic (checksums, validators)
+   - **LLM-based**: LangExtract for prompt-based detection
+4. **Context Enhancement** → `ContextAwareEnhancers` boost confidence scores
+5. **Result Aggregation** → Merge overlapping entities, resolve conflicts
+6. **Output** → List of `RecognizerResult` with entity type, location, confidence
+
+**Key insight**: Multiple recognizers can detect the same text span. The engine handles deduplication and picks the highest-confidence result.
+
+### Anonymization Flow (Anonymizer Architecture)
+
+1. **Anonymization Request** → Text + analyzer results + operators config
+2. **Conflict Resolution** → Handle overlapping entities (merge or remove)
+3. **Operator Application** → Apply operators (redact, replace, mask, hash, encrypt, etc.)
+4. **Text Reconstruction** → Build anonymized text maintaining positions
+5. **Deanonymization Mapping** (optional) → Store reversible transformations
+6. **Output** → Anonymized text + operator metadata
+
+**Key insight**: Operators are applied in reverse order (end to start) to maintain text positions.
+
 ### Testing Conventions
 - Test naming: `test_when_[condition]_then_[expected_behavior]`
 - Unit tests in `tests/` directory per package
@@ -182,6 +210,37 @@ pytest -v  # Takes ~2 min, 90%+ tests should pass
    - Update `docs/supported_entities.md` for new entity types
    - Add usage examples in docstrings
 
+## Functional Validation
+
+**CRITICAL**: Always test actual functionality after making changes. Build success and passing unit tests alone are insufficient.
+
+### Quick Functionality Tests
+
+After making changes, validate with these quick scenarios:
+
+```bash
+# 1. CLI Functionality
+cd presidio-cli
+echo "My name is John Doe and my phone number is 555-123-4567" > /tmp/test.txt
+poetry run presidio /tmp/test.txt
+# Expected: Detects PERSON and PHONE_NUMBER entities
+
+# 2. REST API Analysis (requires containers running)
+curl -X POST http://localhost:5002/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"text": "My name is John Doe and my email is john@example.com", "language": "en"}'
+# Expected: Returns JSON with detected PERSON and EMAIL_ADDRESS entities
+
+# 3. REST API Anonymization
+curl -X POST http://localhost:5001/anonymize \
+  -H "Content-Type: application/json" \
+  -d '{"text": "My name is John Doe", "analyzer_results": [{"entity_type": "PERSON", "start": 11, "end": 19, "score": 0.85}]}'
+# Expected: Returns anonymized text with "<PERSON>" replacement
+
+# 4. End-to-End Pipeline
+# Use analyzer API to detect → Use anonymizer API with results → Verify quality
+```
+
 ## CI/CD and Coverage Requirements
 
 ### Coverage Thresholds
@@ -189,20 +248,34 @@ pytest -v  # Takes ~2 min, 90%+ tests should pass
 - **85%** for green status, **70%** for warning
 - Coverage reports uploaded to `coverage-data-*` branches
 
-### CI Pipeline (GitHub Actions)
+### CI Pipeline
+- **GitHub Actions** - CI workflow for linting, testing, Docker builds, E2E tests
+- **Azure Pipelines** - Additional build and release automation
+- Uses multi-Python version matrix (3.10, 3.11, 3.12, 3.13)
+- Includes security analysis (CodeQL, Defender for DevOps)
+
+**CI Steps:**
 1. **Lint** - Ruff check on all code
 2. **Dependency Review** - Check for vulnerabilities and license compliance
-3. **Tests** - Multi-Python (3.10-3.13) × Multi-component matrix
+3. **Tests** - Multi-Python × Multi-component matrix (unit + integration)
 4. **Build** - Docker images with multi-platform support (amd64, arm64)
 5. **E2E Tests** - Full service integration testing
 
-### Expected Timeouts
-- Analyzer `poetry install --all-extras`: ~5 min (set 10+ min timeout)
-- Analyzer tests: ~2 min (set 5+ min timeout)
-- Docker builds: 10-15 min (set 30+ min timeout)
-- E2E tests: ~2 min (set 5+ min timeout)
+### Expected Build Times and Timeouts
 
-**CRITICAL**: Never cancel long-running operations. Poetry installs and Docker builds require time.
+**CRITICAL**: Always set appropriate timeouts and NEVER CANCEL long-running operations.
+
+| Operation | Expected Time | Minimum Timeout | Notes |
+|-----------|---------------|-----------------|-------|
+| `poetry install --all-extras` (analyzer) | 5 minutes | 10 minutes | Downloads many dependencies |
+| spaCy model downloads (`en_core_web_lg`) | 1 minute | 3 minutes | ~500MB download |
+| Analyzer tests (`pytest -vv`) | 2 minutes | 5 minutes | 900+ tests |
+| Anonymizer tests | 5 seconds | 1 minute | 266 tests, very fast |
+| CLI tests | 40 seconds | 2 minutes | 23 tests |
+| Docker image pulls | 3 minutes | 10 minutes | Pre-built images |
+| Docker builds from source | 15 minutes | 30 minutes | May fail in restricted networks |
+| Docker service startup | 20 seconds | 60 seconds | Wait before testing |
+| E2E test suite | 2 minutes | 5 minutes | Requires running containers |
 
 ## Pull Request Requirements
 
